@@ -24,75 +24,79 @@ class FileUploadController extends Controller
 
     public function upload(Request $request)
     {
-        // Validate file input
+        // Validasi inputan file
         $request->validate([
             'file' => 'required|file|max:10240',
         ]);
 
-        // Get the file from the request
+        // Ambil file dari request
         $file = $request->file('file');
         $originalName = $file->getClientOriginalName();
         $fileExtension = $file->getClientOriginalExtension();
 
-        // Read file content
+        // Baca isi file
         $fileContent = file_get_contents($file->getRealPath());
 
-        // Encrypt the file
+        // Enkripsi isi file menggunakan ECC
         $privateKey = $this->ecc->generatePrivateKey();
         $publicKey = $this->ecc->generatePublicKey($privateKey);
-
         $encryptedContent = $this->ecc->encrypt($fileContent, $publicKey);
 
-        // Generate encrypted file name without the extension
+        // Simpan file terenkripsi ke direktori
         $encryptedFileName = base64_encode($this->ecc->encrypt(pathinfo($originalName, PATHINFO_FILENAME), $publicKey));
         $path = 'public/uploads/' . $encryptedFileName;
-
-        // Save encrypted file to directory
         Storage::put($path, $encryptedContent);
 
-        // Save file information to the database
-        $this->ecc->saveFileInfo(
-            $originalName,
-            $encryptedFileName, // Save without file extension
-            $path,
-            $publicKey,
-            $privateKey
-        );
+        // Simpan informasi file ke database
+        $upload = new Upload();
+        $upload->original_name = $originalName;
+        $upload->encrypted_name = $encryptedFileName; // Simpan nama file terenkripsi tanpa ekstensi
+        $upload->file_path = $path;
+        $upload->public_key = $publicKey;
+        $upload->private_key = $privateKey;
+        $upload->save();
 
-        // Redirect to the list uploads page
+        // Redirect ke halaman list uploads
         return redirect()->route('uploads.list')->with('success', 'File uploaded and encrypted successfully!');
     }
 
     public function decryptFile($id)
     {
-        // Retrieve the file information from the database
+        // Ambil informasi file dari database berdasarkan ID
         $upload = Upload::findOrFail($id);
 
-        // Extract the necessary information
-        $encryptedName = $upload->encrypted_name;
-        $publicKey = $upload->public_key;
-        $privateKey = $upload->private_key;
-        $path = $upload->file_path;
+        // Ambil path file terenkripsi dari database
+        $encryptedFilePath = storage_path('app/' . $upload->file_path);
 
-        // Read the encrypted file content from storage
-        $encryptedContent = Storage::get($path);
+        // Baca isi file terenkripsi
+        $encryptedContent = Storage::get($upload->file_path);
 
-        // Initialize the ECC service
-        $ecc = new ECC();
+        // Dekripsi isi file menggunakan ECC
+        $decryptedContent = $this->ecc->decrypt($encryptedContent, $upload->private_key);
 
-        // Decrypt the content using the private key
-        $decryptedContent = $ecc->decrypt($encryptedContent, $privateKey);
+        // Dekripsi nama file asli
+        $originalFileName = $this->ecc->decrypt(base64_decode($upload->encrypted_name), $upload->private_key) . '.' . $upload->original_name;
 
-        // Generate the original file name
-        $originalFileName = base64_decode($encryptedName);
-        $fileExtension = pathinfo($originalFileName, PATHINFO_EXTENSION);
+        // Mengunduh file dengan nama asli
+        return response()->streamDownload(function () use ($decryptedContent) {
+            echo $decryptedContent;
+        }, $originalFileName);
+    }
 
-        // Set the appropriate MIME type based on file extension
-        $mimeType = Storage::mimeType($path) ?? 'application/octet-stream';
+    public function downloadEncryptedFile($id)
+    {
+        // Retrieve the file information from the database based on the ID
+        $upload = Upload::findOrFail($id);
 
-        // Return the decrypted file as a download response
-        return response($decryptedContent)
-            ->header('Content-Type', $mimeType)
-            ->header('Content-Disposition', 'attachment; filename="' . $originalFileName . '"');
+        // Get the path to the encrypted file from the database
+        $encryptedFilePath = storage_path('app/' . $upload->file_path);
+
+        // Check if the file exists
+        if (!file_exists($encryptedFilePath)) {
+            return redirect()->route('uploads.list')->with('error', 'Encrypted file not found.');
+        }
+
+        // Provide the encrypted file for download
+        return response()->download($encryptedFilePath, $upload->encrypted_name);
     }
 }
